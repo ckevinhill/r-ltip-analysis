@@ -1,0 +1,541 @@
+---
+title: "LTIP Analysis"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data Acquistion
+
+```{r, echo=FALSE}
+library(tidyquant)
+
+# Download historical P&G stock data:
+getSymbols("PG", from="1991-01-01", to="2021-04-01", auto.assign=TRUE, warnings=FALSE)
+# Download historical S&P500 index data:
+getSymbols("SPY", from="1991-01-01", to="2021-04-01", auto.assign=TRUE, warnings=FALSE)
+```
+
+
+```{r}
+library(dplyr)
+
+# Join PG & SP500 data-sets by date:
+joined_xts <- merge( SPY, PG )
+
+# Adjusted Prices used to reflect stock split valuations:
+joined_df <- data.frame(date=index(joined_xts), coredata(joined_xts)) %>% 
+              filter(!is.na(SPY.Close)) %>% select(date, SPY.Adjusted, PG.Adjusted)
+
+```
+
+
+```{r}
+library(ggplot2)
+
+ggplot() +
+  geom_line(data=joined_df, aes(x=date, y=PG.Adjusted), color="blue") +
+  #geom_line(data=joined_df, aes(x=date, y=SPY.Adjusted), color="red") +
+  ggtitle("P&G Stock Price (Adjusted)")+
+  labs(y="Adjusted Price")
+```
+# Feature Calculation
+
+```{r}
+# Summarize to month/year for simplification:
+summary_df <- joined_df %>%
+                mutate( year_month = format(joined_df$date,"%Y-%m-01") ) %>%
+                mutate( year_month = as.Date(.$year_month, format="%Y-%m-%d" ) ) %>%
+                group_by( year_month ) %>%
+                  summarize( PG.AVG = mean(PG.Adjusted), SPY.AVG = mean(SPY.Adjusted), .groups="drop")
+```
+
+
+```{r}
+# Calculate Year Ago Values:
+ya_df <- summary_df %>% 
+          mutate( PG.YA = lag( PG.AVG, order_by=year_month, n=12 ) ) %>%
+          mutate( SPY.YA = lag( SPY.AVG, order_by=year_month, n=12 ) ) %>%
+          mutate ( PG.IYA = PG.AVG / PG.YA ) %>%
+          mutate ( SPY.IYA = SPY.AVG / SPY.YA ) %>%
+          mutate ( REL_GROWTH = PG.IYA / SPY.IYA ) %>%
+          select ( year_month, PG.AVG, PG.YA, PG.IYA, REL_GROWTH ) %>%
+          filter(!is.na(REL_GROWTH))
+```
+
+```{r}
+# Add Future simulation values for PG Price:
+simulation_df <-  ya_df %>% 
+                    mutate( PG.3Y = lead( PG.AVG, order_by=year_month, n=12*3 ) ) %>%
+                    mutate( PG.3Y_INDEX = PG.3Y/PG.AVG ) %>%
+                    mutate( PG.5Y = lead( PG.AVG, order_by=year_month, n=12*5 ) ) %>%
+                    mutate( PG.5Y_INDEX = PG.5Y/PG.AVG ) %>%
+                    mutate( PG.10Y = lead( PG.AVG, order_by=year_month, n=12*10 ) ) %>%
+                    mutate( PG.10Y_INDEX = PG.10Y/PG.AVG )
+```
+
+
+```{r}
+# Define consistent colors for graphing:
+colors <- c("PG.IYA" = "black", "PG.3Y_INDEX" = "red", "PG.5Y_INDEX" = "blue", "PG.10Y_INDEX" = "green" )
+```
+
+# Outlier Detection
+
+
+```{r}
+library(ggQC)
+
+ggplot(simulation_df, aes(x=year_month, y=PG.IYA)) +
+  geom_line( na.rm=TRUE, group=1, color="black") + 
+  stat_QC( method="XmR", auto.label=T, label.digits=2, show.1n2.sigma = F ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(y="P&G Stock Price IYA", title="P&G Stock Price IYA Control Chart (3 Sigma)")
+```
+
+```{r}
+ggplot(simulation_df, aes(x=year_month)) +
+  geom_line( aes(y=PG.3Y_INDEX, color="PG.3Y_INDEX"), na.rm=TRUE, group=1 ) +
+  geom_line( aes(y=PG.5Y_INDEX, color="PG.5Y_INDEX"), na.rm=TRUE, group=1 ) +
+  geom_line( aes(y=PG.10Y_INDEX, color="PG.10Y_INDEX"), na.rm=TRUE, group=1 ) +
+labs(y="Price Index", color="Legend") + 
+scale_color_manual(values = colors) 
+
+```
+Period before 1996 has abnormally fast growth leading to outlier returns for that period:
+
+```{r}
+# Filtered data-set:
+filtered_df <- simulation_df %>% 
+                filter( year_month >= "1996-01-01" )
+                
+```
+
+
+
+```{r}
+n_3Y = nrow ( filtered_df %>% filter( !is.na( PG.3Y_INDEX ) ) )
+n_5Y = nrow ( filtered_df %>% filter( !is.na( PG.5Y_INDEX ) ) )
+n_10Y = nrow ( filtered_df %>% filter( !is.na( PG.10Y_INDEX ) ) )
+
+```
+
+
+## Improve normalization with log transformation
+
+```{r}
+# Improvement with log values?
+filtered_df <- filtered_df %>% 
+                mutate( PG.LOG_3Y_INDEX = log(PG.3Y_INDEX) ) %>%
+                mutate( PG.LOG_5Y_INDEX = log(PG.5Y_INDEX) ) %>%
+                mutate( PG.LOG_10Y_INDEX = log(PG.10Y_INDEX) )
+
+```
+
+
+```{r}
+library (tidyr)
+
+pvt_df <- filtered_df %>%
+            select("PG.LOG_3Y_INDEX", "PG.LOG_5Y_INDEX") %>%
+            pivot_longer(
+              cols=everything(),
+              names_to = "PERIOD",
+              values_to = "LOG_INDEX"
+            )
+```
+
+
+```{r}
+library(grid)
+require(gridExtra)
+
+g1 <- ggplot(filtered_df) +
+  geom_density( aes(x=PG.LOG_3Y_INDEX, color="PG.3Y_INDEX"), na.rm=TRUE, fill="red", alpha=0.05 ) +
+  geom_vline(aes(xintercept=mean(PG.LOG_3Y_INDEX, na.rm=TRUE), color="PG.3Y_INDEX"), linetype="dashed", size=1, alpha=0.25) +
+  stat_function(
+    fun = dnorm, 
+    args = list(mean = mean(filtered_df$PG.LOG_3Y_INDEX, na.rm=T), sd = sd(filtered_df$PG.LOG_3Y_INDEX, na.rm=T)), 
+    color="red", linetype="dashed" ) +
+labs(x="Price Index", color="Legend") + 
+scale_color_manual(values = colors) +
+    xlim(-0.5, 1.25)
+  
+g2 <- ggplot(filtered_df) +
+  geom_density( aes(x=PG.LOG_5Y_INDEX, color="PG.5Y_INDEX"), na.rm=TRUE, fill="blue", alpha=0.05 ) +
+  geom_vline(aes(xintercept=mean(PG.LOG_5Y_INDEX, na.rm=TRUE), color="PG.5Y_INDEX"), linetype="dashed", size=1, alpha=0.25) +
+  stat_function(
+    fun = dnorm, 
+    args = list(mean = mean(filtered_df$PG.LOG_5Y_INDEX, na.rm=T), sd = sd(filtered_df$PG.LOG_5Y_INDEX, na.rm=T)), 
+    color="blue", linetype="dashed" ) +
+labs(x="Price Index", color="Legend") + 
+scale_color_manual(values = colors) +
+    xlim(-0.5, 1.25)
+  
+g3 <- ggplot(filtered_df) +
+  geom_density( aes(x=PG.LOG_10Y_INDEX, color="PG.10Y_INDEX"), na.rm=TRUE, fill="green", alpha=0.05 ) +
+  geom_vline(aes(xintercept=mean(PG.LOG_10Y_INDEX, na.rm=TRUE)), color="green", linetype="dashed", size=1, alpha=0.25) +
+  stat_function(
+    fun = dnorm, 
+    args = list(mean = mean(filtered_df$PG.LOG_10Y_INDEX, na.rm=T), sd = sd(filtered_df$PG.LOG_10Y_INDEX, na.rm=T)), 
+    color="green", linetype="dashed" ) +
+labs(x="Price Index", color="Legend") + 
+scale_color_manual(values = colors) +
+  xlim(-0.5, 1.25)
+
+grid.arrange(g1, g2, g3, nrow=4, top=textGrob("Distribution of Payout (solid) vs. Normal Distribution Per Period Held"))
+
+```
+
+
+```{r}
+qqnorm ( filtered_df$PG.LOG_3Y_INDEX, col="red")
+qqline(filtered_df$PG.LOG_3Y_INDEX, col="red" )
+
+qqnorm ( filtered_df$PG.LOG_5Y_INDEX, col="blue")
+qqline(filtered_df$PG.LOG_5Y_INDEX, col="blue" )
+
+qqnorm ( filtered_df$PG.LOG_10Y_INDEX, col="green")
+qqline(filtered_df$PG.LOG_10Y_INDEX, col="green" )
+```
+
+
+
+
+# Explatory Data Analysis
+
+Review hypothesized key-drivers of stock growth:
+* Time held
+* Performance relative to S&P
+* Performance relative to previous year
+
+## 95% confidence interval for each x-bar
+
+```{r}
+library (BSDA)
+
+tsum.test( 
+  mean.x = mean(filtered_df$PG.LOG_3Y_INDEX, na.rm=T),
+  s.x = sd(filtered_df$PG.LOG_3Y_INDEX, na.rm=T),
+  n.x = n_3Y,
+  mu=0,
+  alternative="greater",
+  conf.level= 0.95
+)
+
+tsum.test( 
+  mean.x = mean(filtered_df$PG.LOG_5Y_INDEX, na.rm=T),
+  s.x = sd(filtered_df$PG.LOG_5Y_INDEX, na.rm=T),
+  n.x = n_5Y,
+  mu=0,
+  alternative="greater",
+  conf.level= 0.95
+)
+
+tsum.test( 
+  mean.x = mean(filtered_df$PG.LOG_10Y_INDEX, na.rm=T),
+  s.x = sd(filtered_df$PG.LOG_10Y_INDEX, na.rm=T),
+  n.x = n_10Y,
+  mu=0,
+  alternative="greater",
+  conf.level= 0.95
+)
+
+
+```
+
+## Time Held: What is probability that 3Y, 5Y & 10Y stock price <= 0 (e.g. Index<=1, Log(Index)<=0) [Assuming ]
+
+(See above distributions)
+
+```{r}
+p3Y <- pnorm( 0, mean= mean(filtered_df$PG.LOG_3Y_INDEX, na.rm=T), sd = sd(filtered_df$PG.LOG_3Y_INDEX, na.rm=T), lower.tail=TRUE)
+p5Y <- pnorm( 0, mean= mean(filtered_df$PG.LOG_5Y_INDEX, na.rm=T), sd = sd(filtered_df$PG.LOG_5Y_INDEX, na.rm=T), lower.tail=TRUE)
+p10Y <- pnorm( 0, mean= mean(filtered_df$PG.LOG_10Y_INDEX, na.rm=T), sd = sd(filtered_df$PG.LOG_10Y_INDEX, na.rm=T), lower.tail=TRUE)
+
+(p3Y*100) 
+(p5Y*100)
+(p10Y*100)
+```
+## Are sample means greater for 3/5/10 year periods statistically?
+
+```{r}
+tsum.test( 
+  mean.y = mean(filtered_df$PG.LOG_3Y_INDEX, na.rm=T), s.y = sd(filtered_df$PG.LOG_3Y_INDEX, na.rm=T), n.y = n_3Y,
+  mean.x = mean(filtered_df$PG.LOG_5Y_INDEX, na.rm=T), s.x = sd(filtered_df$PG.LOG_5Y_INDEX, na.rm=T), n.x = n_5Y,
+  alternative="greater"
+)
+
+tsum.test( 
+  mean.y = mean(filtered_df$PG.LOG_5Y_INDEX, na.rm=T), s.y = sd(filtered_df$PG.LOG_5Y_INDEX, na.rm=T), n.y = n_5Y,
+  mean.x = mean(filtered_df$PG.LOG_10Y_INDEX, na.rm=T), s.x = sd(filtered_df$PG.LOG_10Y_INDEX, na.rm=T), n.x = n_10Y,
+  alternative="greater"
+)
+
+```
+
+### Is REL_GROWTH a driver of Price Index?
+
+```{r}
+require(gridExtra)
+g1 <- ggplot(filtered_df, aes(x=REL_GROWTH)) +
+  geom_point( aes(y=PG.3Y_INDEX), color="red", na.rm=TRUE, size=1)
+
+g2 <- ggplot(filtered_df, aes(x=REL_GROWTH)) +
+  geom_point( aes(y=PG.5Y_INDEX), color="blue", na.rm=TRUE, size=1)
+
+g3 <- ggplot(filtered_df, aes(x=REL_GROWTH)) +
+  geom_point( aes(y=PG.10Y_INDEX), color="green", na.rm=TRUE, size=1)
+
+grid.arrange(g1, g2, g3, nrow=3, top=textGrob("P&G Payout vs. Relative Growth"))
+
+```
+
+```{r}
+
+summary (lm ( PG.3Y_INDEX ~ REL_GROWTH, filtered_df ) )
+summary (lm ( PG.5Y_INDEX ~ REL_GROWTH, filtered_df ) )
+summary (lm ( PG.10Y_INDEX ~ REL_GROWTH, filtered_df ) )
+
+```
+
+This is a useless predictor so will likely be removed from regression consideration.
+
+
+### Is IYA a driver of Price Index?
+
+
+```{r}
+require(gridExtra)
+g1 <- ggplot(filtered_df, aes(x=PG.IYA)) +
+  geom_point( aes(y=PG.3Y_INDEX), color="red", na.rm=TRUE, size=1)
+
+g2 <- ggplot(filtered_df, aes(x=PG.IYA)) +
+  geom_point( aes(y=PG.5Y_INDEX), color="blue", na.rm=TRUE, size=1)
+
+g3 <- ggplot(filtered_df, aes(x=PG.IYA)) +
+  geom_point( aes(y=PG.10Y_INDEX), color="green", na.rm=TRUE, size=1)
+
+grid.arrange(g1, g2, g3, nrow=4, top=textGrob("P&G Stock Growth vs. "))
+
+```
+```{r}
+
+summary (lm ( PG.3Y_INDEX ~ PG.IYA, filtered_df ) )
+summary (lm ( PG.5Y_INDEX ~ PG.IYA, filtered_df ) )
+summary (lm ( PG.10Y_INDEX ~ PG.IYA, filtered_df ) )
+
+```
+# Generate SO_ALLOCATION Payout Data
+
+```{r}
+scenarios <- c(0, .25, .50, .75, 1.0)
+scenario_df <- filtered_df %>% full_join( data.frame(SO_ALLOCATION=scenarios), by=character() )
+
+so_to_rsu = 3
+
+so_payout <- function ( so_alloc, price_start, price_end ) {
+  price_delta <- price_end - price_start
+  
+  if ( is.na(price_end) ) {
+    return(NA)
+  }
+  
+  if ( price_delta < 0 ) {
+    return(0)
+  }
+  return( so_alloc * so_to_rsu * price_delta )
+}
+
+rsu_payout <- function (so_alloc, price_end ) {
+  return ( (1-so_alloc) * price_end )
+}
+
+scenario_df <- scenario_df %>%
+                mutate ( PAYOUT.3Y = mapply( function(x,y,z) (so_payout(x,y,z) + rsu_payout(x,z))/y , SO_ALLOCATION, PG.AVG, PG.3Y ) ) %>%
+                mutate ( PAYOUT.5Y = mapply( function(x,y,z) (so_payout(x,y,z) + rsu_payout(x,z))/y , SO_ALLOCATION, PG.AVG, PG.5Y ) ) %>%
+                mutate ( PAYOUT.10Y = mapply( function(x,y,z) (so_payout(x,y,z) + rsu_payout(x,z))/y , SO_ALLOCATION, PG.AVG, PG.10Y ) ) 
+
+                
+
+```
+
+```{r}
+scenario_df$SO_ALLOCATION_CTG <- as.factor(scenario_df$SO_ALLOCATION)
+
+ggplot( scenario_df, aes(x=SO_ALLOCATION_CTG, y=PAYOUT.3Y, color=SO_ALLOCATION_CTG))+
+  geom_boxplot(na.rm=T) +
+  labs(title="3 Year Stock Optional Allocation Payouts")
+
+ggplot( scenario_df, aes(x=SO_ALLOCATION_CTG, y=PAYOUT.5Y, color=SO_ALLOCATION_CTG))+
+  geom_boxplot(na.rm=T)+
+  labs(title="5 Year Stock Optional Allocation Payouts")
+
+ggplot( scenario_df, aes(x=SO_ALLOCATION_CTG, y=PAYOUT.10Y, color=SO_ALLOCATION_CTG))+
+  geom_boxplot(na.rm = T) +
+  labs(title="10 Year Stock Optional Allocation Payouts")
+
+
+```
+
+```{r}
+c_df <- scenario_df %>% filter( SO_ALLOCATION == 1 ) %>% filter(!is.na(PAYOUT.3Y)) %>% select(PAYOUT.3Y)
+mean_10_0 <- mean( c_df$PAYOUT.3Y, na.rm = T )
+sd_10_0 <- sd( c_df$PAYOUT.3Y, na.rm = T )
+nrow_10_0 <- nrow( c_df )
+
+c_df <- scenario_df %>% filter( SO_ALLOCATION == 0 ) %>% select(PAYOUT.3Y)
+mean_10_1 <- mean( c_df$PAYOUT.3Y, na.rm = T )
+sd_10_1 <- sd( c_df$PAYOUT.3Y, na.rm = T )
+nrow_10_1 <- nrow( c_df )
+
+tsum.test( 
+  mean.y = mean_10_0, s.y = sd_10_0, n.y = nrow_10_0,
+  mean.x = mean_10_1, s.x = sd_10_1, n.x = nrow_10_1,
+  alternative="greater"
+)
+
+
+```
+
+
+# Build Regression Model
+
+```{r}
+pvt_df <- scenario_df %>%
+          select ( SO_ALLOCATION, REL_GROWTH, PG.IYA, PG.AVG, PAYOUT.3Y, PAYOUT.5Y, PAYOUT.10Y) %>%
+          pivot_longer( cols=starts_with("PAYOUT"), names_to="PERIOD_HELD", values_to="PAYOUT" ) %>%
+          filter(!is.na(PAYOUT))
+
+pvt_df$SO_ALLOCATION <- as.factor(pvt_df$SO_ALLOCATION)
+
+chart.Correlation( pvt_df %>% select_if(is.numeric) )
+```
+## Linear Regression
+
+```{r}
+train_pcnt=.7
+test_pcnt = .3
+
+ind <- sample(2, nrow(pvt_df), replace = T, prob = c(train_pcnt, test_pcnt))
+
+
+train_data <- pvt_df[ind == 1,]
+test_data <- pvt_df[ind == 2,]
+
+linear_model = lm ( PAYOUT ~ SO_ALLOCATION + PG.IYA + PERIOD_HELD, data=train_data )
+summary(linear_model)
+
+```
+
+```{r}
+library(olsrr)
+library(MASS)
+
+(all <- ols_step_all_possible(linear_model)) 
+
+m_opt <- stepAIC(linear_model, direction = "both", trace = F)
+summary(m_opt)
+```
+
+
+```{r}
+plot ( linear_model )
+```
+
+```{r}
+library(MLmetrics)
+test_data$prediction <- predict ( linear_model, test_data)
+
+# Can't use MAPE since y_true can be zero:
+MAE( y_pred=test_data$prediction, y_true=test_data$PAYOUT )
+
+plot ( test_data$PAYOUT, test_data$prediction )
+
+```
+
+
+
+```{r}
+library(rpart)
+library(rpart.plot)
+
+tree <- rpart ( formula = PAYOUT ~ SO_ALLOCATION + REL_GROWTH + PG.IYA + PERIOD_HELD, data=train_data)
+
+rpart.plot(tree)
+printcp(tree)
+plotcp(tree)
+rpart.rules(tree)
+print(tree)
+summary(tree)
+```
+```{r}
+test_data$tree_prediction = predict( tree, test_data )
+
+# Can't use MAPE since y_true can be zero:
+MAE( y_pred=test_data$tree_prediction, y_true=test_data$PAYOUT )
+
+plot ( test_data$PAYOUT, test_data$tree_prediction, main="Tree predictions actual vs. predicted", xlab="Actual Payout", ylab="Predicted Payout")
+```
+
+```{r}
+library(caret)
+
+cvcontrol <- trainControl(method="repeatedcv", 
+                          number = 5,
+                          repeats = 2,
+                          allowParallel=TRUE)
+
+forest <- train(PAYOUT ~ ., 
+                data=train_data,
+                method="rf",
+                trControl=cvcontrol,
+                importance=TRUE)
+```
+
+
+
+```{r}
+library(caret)
+
+plot(varImp(forest))
+
+test_data$forest_prediction <-  predict(forest,  test_data)
+MAE( test_data$PAYOUT, test_data$forest_prediction)
+
+# sqrt(mean((test$medv - rf)^2))
+# cor(test$medv, rf) ^2
+
+plot(test_data$PAYOUT, test_data$forest_prediction)
+
+```
+
+
+```{r}
+library(lime)
+
+explainer <- lime(train_data[1:5,], forest, n_bins = 5)
+explanation <- explain( x = train_data[1:5,], 
+                        explainer = explainer, 
+                        n_features = 5)
+plot_features(explanation)
+plot_explanations(explanation)
+
+```
+
+# Follow up question - would it be better to invest externally?
+
+
+
+```{r}
+ggplot(filtered_df, aes(y=REL_GROWTH)) +
+  geom_boxplot(na.rm = T) + 
+  labs (title="P&G stock price growth vs. S&P500 growth")
+
+mean(filtered_df$REL_GROWTH)
+```
+
+
+
