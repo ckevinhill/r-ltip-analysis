@@ -488,7 +488,7 @@ cvcontrol <- trainControl(method="repeatedcv",
                           repeats = 2,
                           allowParallel=TRUE)
 
-forest <- train(PAYOUT ~ ., 
+forest <- train(PAYOUT ~ SO_ALLOCATION + REL_GROWTH + PG.IYA + PERIOD_HELD, 
                 data=train_data,
                 method="rf",
                 trControl=cvcontrol,
@@ -508,7 +508,7 @@ MAE( test_data$PAYOUT, test_data$forest_prediction)
 # sqrt(mean((test$medv - rf)^2))
 # cor(test$medv, rf) ^2
 
-plot(test_data$PAYOUT, test_data$forest_prediction)
+plot(test_data$PAYOUT, test_data$forest_prediction, main="Tree predictions actual vs. predicted", xlab="Actual Payout", ylab="Predicted Payout")
 
 ```
 
